@@ -1,187 +1,347 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  createPublicClient,
-  createWalletClient,
-  custom,
-  formatUnits,
-  http,
-  isAddress,
-  parseEther,
-  parseUnits,
-  type Address,
-} from 'viem';
-import { sepolia } from 'viem/chains';
-import { vaultAbi } from '../abi/vaultAbi';
-import { getVaultAddress, tokenAbi } from '../lib/networks';
-import type { MarketData } from '../types/vault';
+import { getContract, prepareContractCall, waitForReceipt } from 'thirdweb';
+import { useSendTransaction } from 'thirdweb/react';
+import { createPublicClient, formatUnits, http, parseEther, parseUnits, type Abi, type Address } from 'viem';
+import erc20Json from '../abi/ERC20.json';
+import vaultJson from '../abi/Vault.json';
+import { defaultNetwork, toThirdwebChain, type SupportedNetwork } from '../lib/networks';
+import { thirdwebClient } from '../lib/thirdweb';
+import type { CreateFundInput, TokenMetadata, VaultFund, VaultStatus } from '../types/vault';
 
-type EthereumProvider = { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> };
+const vaultAbi = vaultJson.abi as Abi;
+const erc20Abi = erc20Json.abi as Abi;
+const zeroAddress = '0x0000000000000000000000000000000000000000' as Address;
 
-const ZERO = '0x0000000000000000000000000000000000000000';
+const formatVaultBalance = (amount: bigint, decimals: number) => {
+  const formatted = formatUnits(amount, decimals);
+  const [whole, fraction = ''] = formatted.split('.');
+  const trimmed = fraction.slice(0, 4).replace(/0+$/, '');
+  return trimmed ? `${whole}.${trimmed}` : whole;
+};
 
-export const useVault = (account?: Address, chainId?: number) => {
-  const [funds, setFunds] = useState<MarketData[]>([]);
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return 'Something went wrong while talking to the vault.';
+};
+
+const withContractAddress = (networkName: string, contractAddress?: Address) => {
+  if (!contractAddress) {
+    throw new Error(`No vault contract address configured for ${networkName}.`);
+  }
+
+  return contractAddress;
+};
+
+export function useVault(account?: Address, network: SupportedNetwork = defaultNetwork, walletChainId?: number) {
+  const [funds, setFunds] = useState<VaultFund[]>([]);
   const [loading, setLoading] = useState(false);
-  const [txState, setTxState] = useState<string>('');
+  const [status, setStatus] = useState<VaultStatus>({ tone: 'idle', message: '' });
+  const { mutateAsync: sendTransaction, isPending } = useSendTransaction();
 
-  const vaultAddress = useMemo(() => getVaultAddress(chainId), [chainId]);
+  const contractAddress = network.contractAddress;
+  const publicClient = useMemo(
+    () =>
+      createPublicClient({
+        transport: http(network.rpc),
+      }),
+    [network.rpc],
+  );
 
-  const publicClient = useMemo(() => createPublicClient({ chain: sepolia, transport: http() }), []);
+  const thirdwebChain = useMemo(() => toThirdwebChain(network), [network]);
+
+  const contract = useMemo(() => {
+    if (!contractAddress) {
+      return null;
+    }
+
+    return getContract({
+      client: thirdwebClient,
+      chain: thirdwebChain,
+      address: contractAddress,
+    });
+  }, [contractAddress, thirdwebChain]);
+
+  const inspectToken = useCallback(
+    async (tokenAddress: Address): Promise<TokenMetadata> => {
+      const [symbolResult, decimalsResult] = await Promise.allSettled([
+        publicClient.readContract({
+          address: tokenAddress,
+          abi: erc20Abi,
+          functionName: 'symbol',
+        }),
+        publicClient.readContract({
+          address: tokenAddress,
+          abi: erc20Abi,
+          functionName: 'decimals',
+        }),
+      ]);
+
+      return {
+        address: tokenAddress,
+        symbol: symbolResult.status === 'fulfilled' ? String(symbolResult.value) : 'TOKEN',
+        decimals: decimalsResult.status === 'fulfilled' ? Number(decimalsResult.value) : 18,
+      };
+    },
+    [publicClient],
+  );
 
   const refresh = useCallback(async () => {
-    if (!account || !vaultAddress || vaultAddress === ZERO) {
+    if (!account || !contractAddress) {
       setFunds([]);
       return;
     }
 
     setLoading(true);
-    try {
-      const totalFunds = (await publicClient.readContract({
-        address: vaultAddress,
-        abi: vaultAbi,
-        functionName: 'funds',
-      })) as bigint;
 
-      if (totalFunds === 0n) {
+    try {
+      const totalFunds = Number(
+        await publicClient.readContract({
+          address: contractAddress,
+          abi: vaultAbi,
+          functionName: 'funds',
+        }),
+      );
+
+      if (totalFunds === 0) {
         setFunds([]);
         return;
       }
 
-      const collected: MarketData[] = [];
-      for (let i = 1n; i <= totalFunds; i++) {
-        const row = (await publicClient.readContract({
-          address: vaultAddress,
-          abi: vaultAbi,
-          functionName: 'allMarketData',
-          args: [i],
-        })) as readonly [Address, bigint, bigint, bigint, boolean, boolean];
+      const ids = Array.from({ length: totalFunds }, (_, index) => BigInt(index + 1));
+      const [marketResults, tokenResults] = await Promise.all([
+        publicClient.multicall({
+          contracts: ids.map((id) => ({
+            address: contractAddress,
+            abi: vaultAbi,
+            functionName: 'allMarketData',
+            args: [id],
+          })),
+          allowFailure: true,
+        }),
+        publicClient.multicall({
+          contracts: ids.map((id) => ({
+            address: contractAddress,
+            abi: vaultAbi,
+            functionName: 'paymentTokens',
+            args: [id],
+          })),
+          allowFailure: true,
+        }),
+      ]);
 
-        if (row[0].toLowerCase() !== account.toLowerCase()) continue;
+      const relevant = ids
+        .map((id, index) => {
+          const marketResult = marketResults[index];
+          const tokenResult = tokenResults[index];
 
-        const paymentToken = (await publicClient.readContract({
-          address: vaultAddress,
-          abi: vaultAbi,
-          functionName: 'paymentTokens',
-          args: [i],
-        })) as Address;
-
-        let tokenSymbol = 'ETH';
-        let tokenDecimals = 18;
-
-        if (paymentToken !== ZERO) {
-          try {
-            tokenSymbol = (await publicClient.readContract({
-              address: paymentToken,
-              abi: tokenAbi,
-              functionName: 'symbol',
-            })) as string;
-            tokenDecimals = Number(
-              await publicClient.readContract({
-                address: paymentToken,
-                abi: tokenAbi,
-                functionName: 'decimals',
-              }),
-            );
-          } catch {
-            tokenSymbol = 'ERC20';
-            tokenDecimals = 18;
+          if (marketResult.status !== 'success') {
+            return null;
           }
-        }
 
-        collected.push({
-          id: i,
-          creator: row[0],
-          marketBalance: row[1],
-          startTime: row[2],
-          endTime: row[3],
-          feeType: row[4],
-          closed: row[5],
-          paymentToken,
-          tokenSymbol,
-          tokenDecimals,
-        });
-      }
+          const market = marketResult.result as readonly [Address, bigint, bigint, bigint, boolean, boolean];
+          const creator = market[0];
 
-      setFunds(collected.sort((a, b) => Number(b.id - a.id)));
+          if (creator.toLowerCase() !== account.toLowerCase()) {
+            return null;
+          }
+
+          const paymentToken =
+            tokenResult.status === 'success' ? (tokenResult.result as Address) : zeroAddress;
+
+          return {
+            id,
+            creator,
+            marketBalance: market[1],
+            startTime: market[2],
+            endTime: market[3],
+            feeType: market[4],
+            closed: market[5],
+            paymentToken,
+          };
+        })
+        .filter((fund): fund is NonNullable<typeof fund> => Boolean(fund));
+
+      const uniqueTokens = [...new Set(relevant.map((fund) => fund.paymentToken).filter((token) => token !== zeroAddress))];
+      const tokenMetadataEntries = await Promise.all(
+        uniqueTokens.map(async (tokenAddress) => [tokenAddress, await inspectToken(tokenAddress)] as const),
+      );
+      const tokenMetadata = new Map(tokenMetadataEntries);
+
+      const hydratedFunds: VaultFund[] = relevant
+        .map((fund) => {
+          const metadata =
+            fund.paymentToken === zeroAddress
+              ? { address: zeroAddress, symbol: network.symbol, decimals: network.decimals }
+              : tokenMetadata.get(fund.paymentToken) ?? { address: fund.paymentToken, symbol: 'TOKEN', decimals: 18 };
+
+          return {
+            ...fund,
+            tokenSymbol: metadata.symbol,
+            tokenDecimals: metadata.decimals,
+            networkName: network.name,
+            explorerUrl: `${network.blockExplorer}/address/${contractAddress}`,
+            balanceLabel: formatVaultBalance(fund.marketBalance, metadata.decimals),
+          };
+        })
+        .sort((left, right) => Number(right.id - left.id));
+
+      setFunds(hydratedFunds);
+      setStatus((current) => (current.tone === 'error' ? { tone: 'idle', message: '' } : current));
+    } catch (error) {
+      setStatus({
+        tone: 'error',
+        message: getErrorMessage(error),
+      });
     } finally {
       setLoading(false);
     }
-  }, [account, publicClient, vaultAddress]);
+  }, [account, contractAddress, inspectToken, network.blockExplorer, network.decimals, network.name, network.symbol, publicClient]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
+    const timer = window.setTimeout(() => {
       void refresh();
     }, 0);
 
-    return () => clearTimeout(timer);
+    return () => window.clearTimeout(timer);
   }, [refresh]);
 
-  const getWalletClient = useCallback(async () => {
-    const ethereum = (window as Window & { ethereum?: EthereumProvider }).ethereum;
-    if (!ethereum) throw new Error('Wallet not found. Install Coinbase Wallet/MetaMask.');
-
-    await ethereum.request({ method: 'eth_requestAccounts' });
-    return createWalletClient({ chain: sepolia, transport: custom(ethereum) });
-  }, []);
-
   const createFund = useCallback(
-    async (amount: string, days: number, isToken: boolean, tokenAddress?: Address) => {
-      if (!vaultAddress || !account) throw new Error('Connect wallet first.');
-      const walletClient = await getWalletClient();
-      const parsed = isToken ? parseUnits(amount, 18) : parseEther(amount);
-
-      setTxState('Preparing transaction...');
-
-      if (isToken && tokenAddress && isAddress(tokenAddress)) {
-        const approveHash = await walletClient.writeContract({
-          account,
-          address: tokenAddress,
-          abi: tokenAbi,
-          functionName: 'approve',
-          args: [vaultAddress, parsed],
-        });
-        setTxState(`Approval sent: ${approveHash.slice(0, 10)}...`);
-        await publicClient.waitForTransactionReceipt({ hash: approveHash });
+    async (input: CreateFundInput) => {
+      if (!account) {
+        setStatus({ tone: 'error', message: 'Connect your wallet before creating a fund.' });
+        return false;
       }
 
-      const hash = await walletClient.writeContract({
-        account,
-        address: vaultAddress,
-        abi: vaultAbi,
-        functionName: 'deposit',
-        args: [parsed, isToken, tokenAddress && isAddress(tokenAddress) ? tokenAddress : ZERO, BigInt(days)],
-        value: isToken ? 0n : parsed,
-      });
+      if (!contract) {
+        setStatus({ tone: 'error', message: `No contract is configured for ${network.name}.` });
+        return false;
+      }
 
-      setTxState(`Deposit tx sent: ${hash.slice(0, 10)}...`);
-      await publicClient.waitForTransactionReceipt({ hash });
-      setTxState('Fund created successfully.');
-      await refresh();
+      if (walletChainId !== network.chainId) {
+        setStatus({ tone: 'error', message: `Switch your wallet to ${network.name} before creating a fund.` });
+        return false;
+      }
+
+      try {
+        const amount = input.amount.trim();
+        const daysLocked = BigInt(input.daysLocked);
+        let parsedAmount = parseEther(amount);
+        let tokenAddress = zeroAddress;
+
+        if (input.feeType === 'token') {
+          tokenAddress = input.paymentToken;
+          const metadata = await inspectToken(input.paymentToken);
+          parsedAmount = parseUnits(amount, metadata.decimals);
+
+          setStatus({ tone: 'pending', message: `Approving ${metadata.symbol} for the vault...` });
+
+          const approval = prepareContractCall({
+            contract: getContract({
+              client: thirdwebClient,
+              chain: thirdwebChain,
+              address: tokenAddress,
+            }),
+            method: 'function approve(address spender, uint256 amount) returns (bool)',
+            params: [withContractAddress(network.name, contractAddress), parsedAmount],
+          });
+
+          const approvalResult = await sendTransaction(approval);
+
+          await waitForReceipt({
+            client: thirdwebClient,
+            chain: thirdwebChain,
+            transactionHash: approvalResult.transactionHash,
+          });
+        }
+
+        setStatus({ tone: 'pending', message: 'Creating your new vault fund...' });
+
+        const transaction = prepareContractCall({
+          contract,
+          method: 'function deposit(uint256 _marketBalance, bool _feeType, address _paymentToken, uint256 _days) payable',
+          params: [parsedAmount, input.feeType === 'token', tokenAddress, daysLocked],
+          value: input.feeType === 'token' ? 0n : parsedAmount,
+        });
+
+        const result = await sendTransaction(transaction);
+
+        await waitForReceipt({
+          client: thirdwebClient,
+          chain: thirdwebChain,
+          transactionHash: result.transactionHash,
+        });
+
+        setStatus({
+          tone: 'success',
+          message: `Fund created on ${network.name}.`,
+        });
+        await refresh();
+        return true;
+      } catch (error) {
+        setStatus({ tone: 'error', message: getErrorMessage(error) });
+        return false;
+      }
     },
-    [account, getWalletClient, publicClient, refresh, vaultAddress],
+    [account, contract, contractAddress, inspectToken, network.chainId, network.name, refresh, sendTransaction, thirdwebChain, walletChainId],
   );
 
-  const withdraw = useCallback(
-    async (fundId: bigint, amount: string, decimals: number) => {
-      if (!vaultAddress || !account) throw new Error('Connect wallet first.');
-      const walletClient = await getWalletClient();
-      const parsed = parseUnits(amount, decimals);
-      const hash = await walletClient.writeContract({
-        account,
-        address: vaultAddress,
-        abi: vaultAbi,
-        functionName: 'withdraw',
-        args: [fundId, parsed],
-      });
-      setTxState(`Withdraw tx sent: ${hash.slice(0, 10)}...`);
-      await publicClient.waitForTransactionReceipt({ hash });
-      setTxState('Withdrawal completed.');
-      await refresh();
+  const withdrawFund = useCallback(
+    async (fund: VaultFund, amount: string) => {
+      if (!account) {
+        setStatus({ tone: 'error', message: 'Connect your wallet before withdrawing.' });
+        return false;
+      }
+
+      if (!contract) {
+        setStatus({ tone: 'error', message: `No contract is configured for ${network.name}.` });
+        return false;
+      }
+
+      if (walletChainId !== network.chainId) {
+        setStatus({ tone: 'error', message: `Switch your wallet to ${network.name} before withdrawing.` });
+        return false;
+      }
+
+      try {
+        setStatus({ tone: 'pending', message: `Withdrawing ${fund.tokenSymbol} from fund #${fund.id.toString()}...` });
+
+        const transaction = prepareContractCall({
+          contract,
+          method: 'function withdraw(uint256 _fund, uint256 _amount) payable',
+          params: [fund.id, parseUnits(amount, fund.tokenDecimals)],
+        });
+
+        const result = await sendTransaction(transaction);
+
+        await waitForReceipt({
+          client: thirdwebClient,
+          chain: thirdwebChain,
+          transactionHash: result.transactionHash,
+        });
+
+        setStatus({ tone: 'success', message: `Withdrawal complete for fund #${fund.id.toString()}.` });
+        await refresh();
+        return true;
+      } catch (error) {
+        setStatus({ tone: 'error', message: getErrorMessage(error) });
+        return false;
+      }
     },
-    [account, getWalletClient, publicClient, refresh, vaultAddress],
+    [account, contract, network.chainId, network.name, refresh, sendTransaction, thirdwebChain, walletChainId],
   );
 
-  const formatBalance = (fund: MarketData) => formatUnits(fund.marketBalance, fund.tokenDecimals);
-
-  return { funds, loading, txState, setTxState, createFund, withdraw, refresh, vaultAddress, formatBalance, chainId };
-};
+  return {
+    contractAddress,
+    funds,
+    inspectToken,
+    isPending,
+    loading,
+    refresh,
+    status,
+    createFund,
+    withdrawFund,
+  };
+}

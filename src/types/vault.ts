@@ -1,8 +1,16 @@
 import type { Address } from 'viem';
 
 export type ThemeMode = 'light' | 'dark';
+export type AppView = 'overview' | 'create' | 'withdraw';
+export type StatusTone = 'idle' | 'pending' | 'success' | 'error';
 
-export interface MarketData {
+export interface TokenMetadata {
+  address: Address;
+  symbol: string;
+  decimals: number;
+}
+
+export interface VaultFund {
   id: bigint;
   creator: Address;
   marketBalance: bigint;
@@ -13,10 +21,19 @@ export interface MarketData {
   paymentToken: Address;
   tokenSymbol: string;
   tokenDecimals: number;
+  networkName: string;
+  explorerUrl: string;
+  balanceLabel: string;
 }
 
-export interface CountdownState {
-  total: number;
-  remaining: number;
-  unlocked: boolean;
+export interface VaultStatus {
+  tone: StatusTone;
+  message: string;
+}
+
+export interface CreateFundInput {
+  amount: string;
+  daysLocked: number;
+  feeType: 'native' | 'token';
+  paymentToken: Address;
 }
