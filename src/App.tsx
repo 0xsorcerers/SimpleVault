@@ -115,7 +115,7 @@ function App() {
   const [tokenAddress, setTokenAddress] = useState('');
   const [tokenPreview, setTokenPreview] = useState('Token metadata will appear here.');
   const [withdrawAmount, setWithdrawAmount] = useState('');
-  const [nowMs, setNowMs] = useState(0);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -160,6 +160,14 @@ function App() {
   const connectedWrongChain = Boolean(account && activeChain?.id !== selectedNetwork.chainId);
   const configuredNetworkCount = configuredNetworks.length;
   const walletNetwork = getNetworkByChainId(activeChain?.id);
+  const tokenAddressValid = /^0x[a-fA-F0-9]{40}$/.test(tokenAddress);
+  const canCreateFund =
+    Boolean(account) &&
+    Boolean(contractAddress) &&
+    Boolean(amount.trim()) &&
+    daysLocked > 0 &&
+    !isPending &&
+    (assetMode === 'native' || tokenAddressValid);
 
   const handleTokenPreview = async () => {
     if (assetMode !== 'token') {
@@ -188,8 +196,12 @@ function App() {
 
     if (created) {
       setView('withdraw');
+      setSelectedFundId(null);
       setAmount('');
       setWithdrawAmount('');
+      setAssetMode('native');
+      setTokenAddress('');
+      setTokenPreview('Token metadata will appear here.');
     }
   };
 
@@ -446,7 +458,14 @@ function App() {
             </label>
 
             <div className="toggle-row">
-              <button className={assetMode === 'native' ? 'active' : ''} onClick={() => setAssetMode('native')}>
+              <button
+                className={assetMode === 'native' ? 'active' : ''}
+                onClick={() => {
+                  setAssetMode('native');
+                  setTokenAddress('');
+                  setTokenPreview('Token metadata will appear here.');
+                }}
+              >
                 Native asset
               </button>
               <button className={assetMode === 'token' ? 'active' : ''} onClick={() => setAssetMode('token')}>
@@ -469,7 +488,7 @@ function App() {
               </>
             )}
 
-            <button className="primary-action" disabled={!account || !amount || !contractAddress || isPending} onClick={() => void handleCreateFund()}>
+            <button className="primary-action" disabled={!canCreateFund} onClick={() => void handleCreateFund()}>
               {isPending ? 'Working...' : 'Create fund'}
             </button>
 
