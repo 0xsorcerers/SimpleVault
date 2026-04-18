@@ -1,37 +1,40 @@
-import { type Address } from "viem";
+import type { Address } from "viem";
 
 export interface NetworkConfig {
+  key: string;
   name: string;
   chainId: number;
   rpc: string;
   blockExplorer: string;
   decimals: number;
   symbol: string;
-  contract_address: Address;
+  contractAddress: Address;
 }
 
-const sepolia: NetworkConfig = {
-  name: 'Sepolia (Testnet)',
-  chainId: 11155111,
-  rpc: 'https://0xrpc.io/sep',
-  blockExplorer: 'https://sepolia.etherscan.io',
-  decimals: 18,
-  symbol: 'sETH',
-  contract_address: '0xB1383CABf4fFd42204Cc18Df5aF00066d5e71f6a' as Address,
-};
+export const chains: NetworkConfig[] = [
+  {
+    key: "sepolia",
+    name: "Sepolia",
+    chainId: 11155111,
+    rpc: "https://ethereum-sepolia-rpc.publicnode.com",
+    blockExplorer: "https://sepolia.etherscan.io",
+    decimals: 18,
+    symbol: "ETH",
+    contractAddress: "0xB1383CABf4fFd42204Cc18Df5aF00066d5e71f6a" as Address,
+  },
+  {
+    key: "hashkey",
+    name: "HashKey",
+    chainId: 177,
+    rpc: "https://mainnet.hsk.xyz",
+    blockExplorer: "https://hashkey.blockscout.com",
+    decimals: 18,
+    symbol: "HSK",
+    contractAddress: "0x0000000000000000000000000000000000000000" as Address,
+  },
+];
 
-const hashkey: NetworkConfig = {
-  name: 'HashKey Chain (Live)',
-  chainId: 177,
-  rpc: 'https://mainnet.hsk.xyz',
-  blockExplorer: 'https://hashkey.blockscout.com',
-  decimals: 18,
-  symbol: 'HSK',
-  contract_address: '' as Address,
-};
+export const defaultNetwork = chains[0];
 
-
-
-const chains: NetworkConfig[] = [sepolia, hashkey];
-
-export { chains };
+export const getNetworkByChainId = (chainId?: number): NetworkConfig | undefined =>
+  chains.find((network) => network.chainId === chainId);

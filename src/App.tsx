@@ -1,566 +1,311 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ConnectButton, useActiveAccount, useActiveWalletChain, useSwitchActiveWalletChain } from 'thirdweb/react';
-import { motion } from 'framer-motion';
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
-import type { Address } from 'viem';
+import { useEffect, useMemo, useState } from "react";
+import { motion } from "framer-motion";
+import { Cell, Pie, PieChart, ResponsiveContainer } from "recharts";
+import type { Address } from "viem";
+import { useActiveAccount } from "thirdweb/react";
+import { chains } from "./tools/networkData";
+import { useNetworkStore } from "./store/networkStore";
 import {
-  configuredNetworks,
-  defaultNetwork,
-  getNetworkByChainId,
-  supportedNetworks,
-  toThirdwebChain,
-  type SupportedNetwork,
-} from './lib/networks';
-import { getConnectTheme, thirdwebClient, wallets } from './lib/thirdweb';
-import { useVault } from './hooks/useVault';
-import type { AppView, ThemeMode, VaultFund } from './types/vault';
-import './App.css';
+  Connector,
+  ZERO_ADDRESS,
+  formatTokenAmount,
+  readFundCount,
+  readMarketData,
+  readPaymentToken,
+  readTokenDecimals,
+  readTokenSymbol,
+  toTokenSmallestUnit,
+  toWei,
+  useVaultTransactions,
+  type VaultFund,
+} from "./tools/utils";
+import "./App.css";
 
-const storageKeys = {
-  mode: 'simplevault-theme',
-  network: 'simplevault-network',
-} as const;
+type Page = "dashboard" | "deposit" | "withdraw";
 
-const ringPalette = {
-  native: ['#0f6bff', '#92f4cf', '#c6d7f8'],
-  token: ['#ff8a5b', '#ffd26f', '#ffdfe0'],
-  urgent: ['#ef4444', '#fb7185', '#fee2e2'],
-} as const;
+const shortAddress = (address?: string) => (address ? `${address.slice(0, 6)}...${address.slice(-4)}` : "-");
 
-const readStoredTheme = (): ThemeMode => {
-  if (typeof window === 'undefined') {
-    return 'dark';
-  }
-
-  return window.localStorage.getItem(storageKeys.mode) === 'light' ? 'light' : 'dark';
-};
-
-const readStoredNetwork = () => {
-  if (typeof window === 'undefined') {
-    return defaultNetwork;
-  }
-
-  const stored = window.localStorage.getItem(storageKeys.network);
-  return supportedNetworks.find((network) => network.key === stored) ?? defaultNetwork;
-};
-
-const formatCountdown = (distanceMs: number) => {
-  if (distanceMs <= 0) {
-    return 'Unlocked now';
-  }
-
-  const totalSeconds = Math.floor(distanceMs / 1000);
-  const days = Math.floor(totalSeconds / 86400);
-  const hours = Math.floor((totalSeconds % 86400) / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-
-  if (days > 0) {
-    return `${days}d ${hours}h ${minutes}m`;
-  }
-
-  if (hours > 0) {
-    return `${hours}h ${minutes}m ${seconds}s`;
-  }
-
-  return `${minutes}m ${seconds}s`;
-};
-
-const getFundMetrics = (fund: VaultFund | undefined, now: number) => {
-  if (!fund) {
-    return {
-      elapsedMs: 0,
-      remainingMs: 0,
-      unlocksAt: '',
-      progress: 0,
-      status: 'Awaiting fund selection',
-      chartColors: ringPalette.native,
-      unlocked: false,
-    };
-  }
-
-  const start = Number(fund.startTime) * 1000;
-  const end = Number(fund.endTime) * 1000;
-  const durationMs = Math.max(end - start, 1);
-  const elapsedMs = Math.min(Math.max(now - start, 0), durationMs);
-  const remainingMs = Math.max(end - now, 0);
-  const progress = durationMs > 0 ? Math.min(100, (elapsedMs / durationMs) * 100) : 0;
-  const unlocked = remainingMs <= 0 && !fund.closed;
-  const urgent = remainingMs > 0 && remainingMs < 24 * 60 * 60 * 1000;
-  const chartColors = urgent ? ringPalette.urgent : fund.feeType ? ringPalette.token : ringPalette.native;
-
-  return {
-    elapsedMs,
-    remainingMs,
-    unlocksAt: new Date(end).toLocaleString(),
-    progress,
-    status: fund.closed ? 'Fully withdrawn' : unlocked ? 'Ready to withdraw' : 'Lock still active',
-    chartColors,
-    unlocked,
-  };
+const formatCountdown = (secondsLeft: number) => {
+  if (secondsLeft <= 0) return "Unlocked";
+  const d = Math.floor(secondsLeft / 86400);
+  const h = Math.floor((secondsLeft % 86400) / 3600);
+  const m = Math.floor((secondsLeft % 3600) / 60);
+  return `${d}d ${h}h ${m}m`;
 };
 
 function App() {
   const account = useActiveAccount();
-  const activeChain = useActiveWalletChain();
-  const switchChain = useSwitchActiveWalletChain();
+  const { selectedNetwork, setSelectedNetwork } = useNetworkStore();
+  const { deposit, withdraw, approveToken, isPending } = useVaultTransactions();
 
-  const [mode, setMode] = useState<ThemeMode>(readStoredTheme);
-  const [selectedNetwork, setSelectedNetwork] = useState<SupportedNetwork>(readStoredNetwork);
-  const [view, setView] = useState<AppView>('overview');
-  const [selectedFundId, setSelectedFundId] = useState<bigint | null>(null);
-  const [amount, setAmount] = useState('');
+  const [page, setPage] = useState<Page>("dashboard");
+  const [allFunds, setAllFunds] = useState<VaultFund[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState("Connect your wallet to load your vaults.");
+
+  const [depositAmount, setDepositAmount] = useState("0.1");
   const [daysLocked, setDaysLocked] = useState(30);
-  const [assetMode, setAssetMode] = useState<'native' | 'token'>('native');
-  const [tokenAddress, setTokenAddress] = useState('');
-  const [tokenPreview, setTokenPreview] = useState('Token metadata will appear here.');
-  const [withdrawAmount, setWithdrawAmount] = useState('');
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [isTokenMode, setIsTokenMode] = useState(false);
+  const [tokenAddress, setTokenAddress] = useState("");
+
+  const [selectedFundId, setSelectedFundId] = useState<number | null>(null);
+  const [withdrawAmount, setWithdrawAmount] = useState("0");
+  const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      setNowMs(Date.now());
-    }, 1000);
-
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
 
-  useEffect(() => {
-    window.localStorage.setItem(storageKeys.mode, mode);
-  }, [mode]);
-
-  useEffect(() => {
-    window.localStorage.setItem(storageKeys.network, selectedNetwork.key);
-  }, [selectedNetwork.key]);
-
-  const { contractAddress, createFund, funds, inspectToken, isPending, loading, status, withdrawFund } = useVault(
-    account?.address as Address | undefined,
-    selectedNetwork,
-    activeChain?.id,
-  );
-
-  const selectedFund = useMemo(
-    () =>
-      funds.find((fund) => fund.id === selectedFundId) ??
-      funds[0] ??
-      undefined,
-    [funds, selectedFundId],
-  );
-
-  const fundMetrics = useMemo(() => getFundMetrics(selectedFund, nowMs), [selectedFund, nowMs]);
-
-  const chartData = useMemo(
-    () => [
-      { name: 'Elapsed', value: Math.max(fundMetrics.elapsedMs, 0) || 1 },
-      { name: 'Remaining', value: Math.max(fundMetrics.remainingMs, 0) || 1 },
-    ],
-    [fundMetrics.elapsedMs, fundMetrics.remainingMs],
-  );
-
-  const connectedWrongChain = Boolean(account && activeChain?.id !== selectedNetwork.chainId);
-  const configuredNetworkCount = configuredNetworks.length;
-  const walletNetwork = getNetworkByChainId(activeChain?.id);
-  const tokenAddressValid = /^0x[a-fA-F0-9]{40}$/.test(tokenAddress);
-  const canCreateFund =
-    Boolean(account) &&
-    Boolean(contractAddress) &&
-    Boolean(amount.trim()) &&
-    daysLocked > 0 &&
-    !isPending &&
-    (assetMode === 'native' || tokenAddressValid);
-
-  const handleTokenPreview = async () => {
-    if (assetMode !== 'token') {
-      return;
+  const loadVaults = async () => {
+    setLoading(true);
+    try {
+      const total = await readFundCount();
+      const ids = Array.from({ length: total }, (_, idx) => idx);
+      const marketData = await readMarketData(ids);
+      const enriched = await Promise.all(
+        marketData.map(async (market, i) => {
+          const paymentToken = await readPaymentToken(i);
+          return {
+            ...market,
+            id: i,
+            paymentToken,
+          } as VaultFund;
+        }),
+      );
+      setAllFunds(enriched);
+      setStatus(`Loaded ${enriched.length} funds from ${selectedNetwork.name}.`);
+    } catch (error) {
+      console.error(error);
+      setStatus("Unable to fetch vault data. Confirm contract + network config.");
+    } finally {
+      setLoading(false);
     }
-
-    if (!/^0x[a-fA-F0-9]{40}$/.test(tokenAddress)) {
-      setTokenPreview('Enter a valid ERC20 token address.');
-      return;
-    }
-
-    const metadata = await inspectToken(tokenAddress as Address);
-    setTokenPreview(`${metadata.symbol} with ${metadata.decimals} decimals detected.`);
   };
 
-  const handleCreateFund = async () => {
-    const created = await createFund({
-      amount,
-      daysLocked,
-      feeType: assetMode,
-      paymentToken:
-        assetMode === 'token'
-          ? (tokenAddress as Address)
-          : ('0x0000000000000000000000000000000000000000' as Address),
-    });
+  useEffect(() => {
+    void loadVaults();
+  }, [selectedNetwork]);
 
-    if (created) {
-      setView('withdraw');
-      setSelectedFundId(null);
-      setAmount('');
-      setWithdrawAmount('');
-      setAssetMode('native');
-      setTokenAddress('');
-      setTokenPreview('Token metadata will appear here.');
+  const myFunds = useMemo(() => {
+    if (!account?.address) return [];
+    return allFunds.filter((fund) => fund.creator.toLowerCase() === account.address.toLowerCase());
+  }, [account?.address, allFunds]);
+
+  const selectedFund = useMemo(
+    () => myFunds.find((f) => f.id === selectedFundId) ?? myFunds[0],
+    [myFunds, selectedFundId],
+  );
+
+  const lockMetrics = useMemo(() => {
+    if (!selectedFund) return { progress: 0, secondsLeft: 0, unlocked: false };
+    const start = Number(selectedFund.startTime) * 1000;
+    const end = Number(selectedFund.endTime) * 1000;
+    const total = Math.max(end - start, 1);
+    const elapsed = Math.min(Math.max(now - start, 0), total);
+    const secondsLeft = Math.max(Math.floor((end - now) / 1000), 0);
+    return {
+      progress: Math.round((elapsed / total) * 100),
+      secondsLeft,
+      unlocked: secondsLeft === 0 && !selectedFund.closed,
+    };
+  }, [selectedFund, now]);
+
+  const handleDeposit = async () => {
+    try {
+      if (!depositAmount || daysLocked <= 0) return;
+      let amount = toWei(depositAmount);
+      let paymentToken = ZERO_ADDRESS;
+
+      if (isTokenMode) {
+        if (!/^0x[a-fA-F0-9]{40}$/.test(tokenAddress)) {
+          setStatus("Enter a valid token address.");
+          return;
+        }
+        paymentToken = tokenAddress as Address;
+        const decimals = await readTokenDecimals(paymentToken);
+        amount = toTokenSmallestUnit(depositAmount, decimals);
+        await approveToken(paymentToken, amount);
+      }
+
+      await deposit({
+        marketBalance: amount,
+        feeType: isTokenMode,
+        paymentToken,
+        days: daysLocked,
+      });
+
+      setStatus("Vault deposited successfully.");
+      await loadVaults();
+      setPage("dashboard");
+    } catch (error) {
+      console.error(error);
+      setStatus("Deposit failed. Review wallet/network and try again.");
     }
   };
 
   const handleWithdraw = async () => {
-    if (!selectedFund) {
-      return;
-    }
-
-    const withdrawn = await withdrawFund(selectedFund, withdrawAmount);
-    if (withdrawn) {
-      setWithdrawAmount('');
-    }
-  };
-
-  const handleSelectNetwork = async (network: SupportedNetwork) => {
-    setSelectedNetwork(network);
-
-    if (!account) {
-      return;
-    }
-
+    if (!selectedFund || !withdrawAmount) return;
     try {
-      await switchChain(toThirdwebChain(network));
-    } catch {
-      // Keep the preferred network in the UI even if the wallet rejects the switch.
+      const decimals = selectedFund.paymentToken === ZERO_ADDRESS ? 18 : await readTokenDecimals(selectedFund.paymentToken);
+      const amount = toTokenSmallestUnit(withdrawAmount, decimals);
+      await withdraw(selectedFund.id, amount);
+      setStatus(`Withdraw submitted for Fund #${selectedFund.id}.`);
+      setWithdrawAmount("0");
+      await loadVaults();
+    } catch (error) {
+      console.error(error);
+      setStatus("Withdraw failed. Vault may still be locked or amount too high.");
     }
   };
+
+  const [symbol, setSymbol] = useState(selectedNetwork.symbol);
+  useEffect(() => {
+    const resolveSymbol = async () => {
+      if (!selectedFund) {
+        setSymbol(selectedNetwork.symbol);
+        return;
+      }
+      const tokenSymbol = await readTokenSymbol(selectedFund.paymentToken);
+      setSymbol(tokenSymbol);
+    };
+    void resolveSymbol();
+  }, [selectedFund, selectedNetwork.symbol]);
+
+  const chartData = [
+    { name: "Locked", value: Math.max(100 - lockMetrics.progress, 1) },
+    { name: "Matured", value: Math.max(lockMetrics.progress, 1) },
+  ];
 
   return (
-    <div className={`app-shell ${mode}`}>
-      <div className="backdrop backdrop-one" />
-      <div className="backdrop backdrop-two" />
-      <div className="backdrop backdrop-three" />
-
-      <header className="hero glass">
-        <div className="hero-copy">
-          <span className="eyebrow">SimpleVault</span>
-          <h1>Coinbase-clean vault controls with a softer, playful edge.</h1>
-          <p>
-            Create time-locked native or ERC20 funds, browse everything your connected wallet owns, and unlock withdrawals
-            with a live animated countdown.
-          </p>
-          <div className="hero-actions">
-            <button className="mode-toggle" onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')}>
-              {mode === 'dark' ? 'Switch to light' : 'Switch to dark'}
-            </button>
-            <div className="status-pill">
-              {configuredNetworkCount > 0
-                ? `${configuredNetworkCount} configured network${configuredNetworkCount > 1 ? 's' : ''}`
-                : 'Add a vault address to begin'}
-            </div>
-          </div>
-        </div>
-
-        <div className="hero-connect glass-subtle">
-          <div className="wallet-caption">
-            <strong>Connect and continue</strong>
-            <span>Coinbase Wallet is first in the list, then MetaMask, WalletConnect, and social login.</span>
-          </div>
-          <ConnectButton
-            client={thirdwebClient}
-            chain={toThirdwebChain(selectedNetwork)}
-            wallets={wallets}
-            theme={getConnectTheme(mode)}
-            connectButton={{ label: account ? 'Wallet connected' : 'Connect wallet' }}
-            connectModal={{
-              size: 'wide',
-              title: 'Open SimpleVault',
-              welcomeScreen: {
-                title: 'SimpleVault',
-                subtitle: 'Lock assets with calm, polished control.',
-              },
-            }}
-          />
-          <div className="network-strip">
-            {supportedNetworks.map((network) => (
+    <div className="vault-app">
+      <header className="hero">
+        <div>
+          <p className="eyebrow">SimpleVault</p>
+          <h1>Institutional-grade vault dashboard for your wallet-created locks.</h1>
+          <p className="subtitle">Coinbase-inspired clarity, with animated lock telemetry and quick deposit/withdraw controls.</p>
+          <div className="chips">
+            {chains.map((chain) => (
               <button
-                key={network.chainId}
-                className={`network-chip ${network.chainId === selectedNetwork.chainId ? 'active' : ''}`}
-                onClick={() => void handleSelectNetwork(network)}
+                key={chain.chainId}
+                className={chain.chainId === selectedNetwork.chainId ? "chip active" : "chip"}
+                onClick={() => setSelectedNetwork(chain)}
               >
-                <span>{network.name}</span>
-                <small>{network.contractAddress ? 'Vault ready' : 'Needs address'}</small>
+                {chain.name}
               </button>
             ))}
           </div>
         </div>
+        <div className="connect-panel">
+          <Connector />
+          <p>Wallet: {shortAddress(account?.address)}</p>
+          <button className="chip" onClick={() => void loadVaults()}>
+            Refresh Vaults
+          </button>
+        </div>
       </header>
 
-      <nav className="view-tabs">
-        {(['overview', 'create', 'withdraw'] as AppView[]).map((panel) => (
-          <button key={panel} className={view === panel ? 'active' : ''} onClick={() => setView(panel)}>
-            {panel === 'overview' ? 'Overview' : panel === 'create' ? 'Create fund' : 'Withdraw'}
+      <nav className="tabs">
+        {(["dashboard", "deposit", "withdraw"] as Page[]).map((item) => (
+          <button key={item} className={page === item ? "tab active" : "tab"} onClick={() => setPage(item)}>
+            {item}
           </button>
         ))}
       </nav>
 
-      <main className="dashboard">
-        <section className="overview-column">
-          <motion.article className="glass card stack-card" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
-            <div className="card-head">
-              <div>
-                <span className="card-label">Portfolio</span>
-                <h2>Your locked funds</h2>
-              </div>
-              <div className={`wallet-state ${connectedWrongChain ? 'warn' : ''}`}>
-                {account
-                  ? connectedWrongChain
-                    ? `Wallet on ${walletNetwork?.name ?? activeChain?.name ?? 'another chain'}`
-                    : `Connected as ${account.address.slice(0, 6)}...${account.address.slice(-4)}`
-                  : 'Not connected'}
-              </div>
-            </div>
-
-            <div className="portfolio-grid">
-              <div>
-                <span className="metric-label">Funds</span>
-                <strong>{funds.length}</strong>
-              </div>
-              <div>
-                <span className="metric-label">Network</span>
-                <strong>{selectedNetwork.name}</strong>
-              </div>
-              <div>
-                <span className="metric-label">Vault address</span>
-                <strong>{contractAddress ? `${contractAddress.slice(0, 6)}...${contractAddress.slice(-4)}` : 'Unconfigured'}</strong>
-              </div>
-            </div>
-
-            <div className="fund-list">
-              {loading && <div className="empty-state">Reading vault data from {selectedNetwork.name}...</div>}
-              {!loading && !funds.length && (
-                <div className="empty-state">
-                  {account ? 'No funds found for this wallet on the selected network yet.' : 'Connect a wallet to load your funds.'}
+      <main className="grid">
+        <section className="card">
+          <h3>My Vaults</h3>
+          {loading ? <p>Loading vaults...</p> : null}
+          {!loading && myFunds.length === 0 ? <p>No vaults created by this wallet address yet.</p> : null}
+          <div className="vault-list">
+            {myFunds.map((fund) => (
+              <button key={fund.id} className={selectedFund?.id === fund.id ? "vault-item active" : "vault-item"} onClick={() => setSelectedFundId(fund.id)}>
+                <div>
+                  <strong>Fund #{fund.id}</strong>
+                  <p>{shortAddress(fund.creator)}</p>
                 </div>
-              )}
-              {funds.map((fund) => {
-                const isSelected = selectedFund?.id === fund.id;
-                return (
-                  <button key={fund.id.toString()} className={`fund-item ${isSelected ? 'active' : ''}`} onClick={() => setSelectedFundId(fund.id)}>
-                    <div>
-                      <strong>Fund #{fund.id.toString()}</strong>
-                      <span>
-                        {fund.balanceLabel} {fund.tokenSymbol}
-                      </span>
-                    </div>
-                    <div className="fund-badges">
-                      <span className={`badge ${fund.closed ? 'neutral' : fund.feeType ? 'warm' : 'cool'}`}>
-                        {fund.closed ? 'Closed' : fund.feeType ? 'ERC20' : 'Native'}
-                      </span>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </motion.article>
-
-          <motion.article className="glass card detail-card" initial={{ opacity: 0, y: 22 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }}>
-            <div className="card-head">
-              <div>
-                <span className="card-label">Detail</span>
-                <h2>{selectedFund ? `Fund #${selectedFund.id.toString()}` : 'Select a fund'}</h2>
-              </div>
-              <div className={`timeline-pill ${fundMetrics.unlocked ? 'ready' : ''}`}>{fundMetrics.status}</div>
-            </div>
-
-            {!selectedFund ? (
-              <div className="empty-state">Pick any listed fund to inspect its timing, asset details, and withdrawal controls.</div>
-            ) : (
-              <div className="detail-layout">
-                <div className="chart-panel">
-                  <ResponsiveContainer width="100%" height={310}>
-                    <PieChart>
-                      <Pie data={chartData} dataKey="value" innerRadius={74} outerRadius={112} paddingAngle={4} startAngle={90} endAngle={-270} isAnimationActive>
-                        {chartData.map((entry, index) => (
-                          <Cell key={`${entry.name}-${index}`} fill={fundMetrics.chartColors[index]} />
-                        ))}
-                      </Pie>
-                      <Pie data={[{ name: 'Glow', value: 1 }]} dataKey="value" innerRadius={117} outerRadius={126} startAngle={90} endAngle={-270}>
-                        <Cell fill={fundMetrics.chartColors[1]} fillOpacity={0.18} />
-                      </Pie>
-                      <Tooltip formatter={(value) => formatCountdown(Number(value ?? 0))} />
-                    </PieChart>
-                  </ResponsiveContainer>
-
-                  <motion.div
-                    className="center-orb"
-                    animate={{
-                      boxShadow: `0 0 40px ${fundMetrics.chartColors[0]}66, inset 0 1px 0 rgba(255,255,255,0.55)`,
-                      rotate: fundMetrics.progress / 30,
-                    }}
-                    transition={{ type: 'spring', stiffness: 90, damping: 18 }}
-                  >
-                    <span>{fundMetrics.unlocked ? 'Ready' : `${Math.round(fundMetrics.progress)}%`}</span>
-                    <strong>{formatCountdown(fundMetrics.remainingMs)}</strong>
-                  </motion.div>
-                </div>
-
-                <div className="detail-copy">
-                  <div className="meta-card glass-subtle">
-                    <span className="metric-label">Asset</span>
-                    <strong>
-                      {selectedFund.tokenSymbol} {selectedFund.feeType ? 'token vault' : 'native vault'}
-                    </strong>
-                    <p>Decimals: {selectedFund.tokenDecimals}</p>
-                  </div>
-
-                  <div className="meta-grid">
-                    <div className="meta-card glass-subtle">
-                      <span className="metric-label">Balance</span>
-                      <strong>
-                        {selectedFund.balanceLabel} {selectedFund.tokenSymbol}
-                      </strong>
-                    </div>
-                    <div className="meta-card glass-subtle">
-                      <span className="metric-label">Unlocks</span>
-                      <strong>{fundMetrics.unlocksAt}</strong>
-                    </div>
-                    <div className="meta-card glass-subtle">
-                      <span className="metric-label">Created</span>
-                      <strong>{new Date(Number(selectedFund.startTime) * 1000).toLocaleString()}</strong>
-                    </div>
-                    <div className="meta-card glass-subtle">
-                      <span className="metric-label">Explorer</span>
-                      <a href={selectedFund.explorerUrl} target="_blank" rel="noreferrer">
-                        View contract
-                      </a>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </motion.article>
+                <span>{fund.closed ? "Closed" : fund.feeType ? "Token" : "Native"}</span>
+              </button>
+            ))}
+          </div>
         </section>
 
-        <section className="action-column">
-          <motion.article className={`glass card ${view === 'create' ? 'featured' : ''}`} initial={{ opacity: 0, x: 18 }} animate={{ opacity: 1, x: 0 }}>
-            <div className="card-head">
-              <div>
-                <span className="card-label">Create</span>
-                <h2>Build a new lock</h2>
-              </div>
-              <div className="status-pill">{selectedNetwork.name}</div>
-            </div>
-
-            <label className="field">
-              <span>Amount</span>
-              <input value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="0.25" />
-            </label>
-
-            <label className="field">
-              <span>Lock duration in days</span>
-              <input type="number" min={1} value={daysLocked} onChange={(event) => setDaysLocked(Number(event.target.value))} />
-            </label>
-
-            <div className="toggle-row">
-              <button
-                className={assetMode === 'native' ? 'active' : ''}
-                onClick={() => {
-                  setAssetMode('native');
-                  setTokenAddress('');
-                  setTokenPreview('Token metadata will appear here.');
-                }}
-              >
-                Native asset
-              </button>
-              <button className={assetMode === 'token' ? 'active' : ''} onClick={() => setAssetMode('token')}>
-                ERC20 token
-              </button>
-            </div>
-
-            {assetMode === 'token' && (
-              <>
-                <label className="field">
-                  <span>Token address</span>
-                  <input
-                    value={tokenAddress}
-                    onChange={(event) => setTokenAddress(event.target.value)}
-                    onBlur={() => void handleTokenPreview()}
-                    placeholder="0x..."
-                  />
-                </label>
-                <div className="token-preview">{tokenPreview}</div>
-              </>
-            )}
-
-            <button className="primary-action" disabled={!canCreateFund} onClick={() => void handleCreateFund()}>
-              {isPending ? 'Working...' : 'Create fund'}
-            </button>
-
-            <p className="helper-copy">
-              Native mode sends `msg.value`. Token mode approves then deposits the ERC20 amount using the token&apos;s live decimals.
-            </p>
-          </motion.article>
-
-          <motion.article className={`glass card ${view === 'withdraw' ? 'featured' : ''}`} initial={{ opacity: 0, x: 18 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.08 }}>
-            <div className="card-head">
-              <div>
-                <span className="card-label">Withdraw</span>
-                <h2>Release a matured fund</h2>
-              </div>
-              <div className={`status-pill ${fundMetrics.unlocked ? 'ready' : ''}`}>{fundMetrics.unlocked ? 'Unlocked' : 'Locked'}</div>
-            </div>
-
-            {selectedFund ? (
-              <>
-                <div className="countdown-card glass-subtle">
-                  <span className="metric-label">Time remaining</span>
-                  <strong>{formatCountdown(fundMetrics.remainingMs)}</strong>
-                  <div className="progress-track">
-                    <motion.div
-                      className="progress-fill"
-                      animate={{
-                        width: `${fundMetrics.progress}%`,
-                        background: `linear-gradient(90deg, ${fundMetrics.chartColors[0]}, ${fundMetrics.chartColors[1]})`,
-                      }}
-                    />
-                  </div>
-                </div>
-
-                <label className="field">
-                  <span>Withdraw amount in {selectedFund.tokenSymbol}</span>
-                  <input value={withdrawAmount} onChange={(event) => setWithdrawAmount(event.target.value)} placeholder={`Max ${selectedFund.balanceLabel}`} />
-                </label>
-
-                <button
-                  className="primary-action"
-                  disabled={!fundMetrics.unlocked || !withdrawAmount || selectedFund.closed || isPending}
-                  onClick={() => void handleWithdraw()}
+        <section className="card lock-card">
+          <h3>Lock Telemetry</h3>
+          {selectedFund ? (
+            <>
+              <div className="chart-wrap">
+                <ResponsiveContainer width="100%" height={240}>
+                  <PieChart>
+                    <Pie data={chartData} innerRadius={60} outerRadius={92} dataKey="value" startAngle={90} endAngle={-270}>
+                      <Cell fill="#1d4ed8" />
+                      <Cell fill="#60a5fa" />
+                    </Pie>
+                  </PieChart>
+                </ResponsiveContainer>
+                <motion.div
+                  className={lockMetrics.unlocked ? "lock-orb unlocked" : "lock-orb"}
+                  animate={{ rotateY: [0, 8, -8, 0], y: [0, -4, 0] }}
+                  transition={{ repeat: Infinity, duration: 4, ease: "easeInOut" }}
                 >
-                  {selectedFund.closed ? 'Fund closed' : fundMetrics.unlocked ? 'Withdraw now' : 'Unlock countdown running'}
-                </button>
-
-                <p className="helper-copy">
-                  Withdrawals activate only after the vault end time passes and the fund still has a remaining balance.
-                </p>
-              </>
-            ) : (
-              <div className="empty-state">Create or select a fund first.</div>
-            )}
-          </motion.article>
-
-          <motion.article className="glass card status-card" initial={{ opacity: 0, x: 18 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.12 }}>
-            <div className="card-head">
-              <div>
-                <span className="card-label">Session</span>
-                <h2>Current state</h2>
+                  {lockMetrics.unlocked ? "🔓" : "🔒"}
+                </motion.div>
               </div>
-              <div className={`status-pill ${status.tone}`}>{status.tone}</div>
-            </div>
-            <p className="session-copy">
-              {status.message || 'Connect your wallet, pick a configured chain, and the dapp will load all funds owned by that address.'}
-            </p>
-            {connectedWrongChain && (
-              <button className="secondary-action" onClick={() => void switchChain(toThirdwebChain(selectedNetwork))}>
-                Switch wallet to {selectedNetwork.name}
+              <p>{formatCountdown(lockMetrics.secondsLeft)} • {lockMetrics.progress}% matured</p>
+              <p>
+                Balance: {formatTokenAmount(selectedFund.marketBalance, selectedFund.paymentToken === ZERO_ADDRESS ? 18 : selectedNetwork.decimals)} {symbol}
+              </p>
+            </>
+          ) : (
+            <p>Select a fund to view lock chart and unlock state.</p>
+          )}
+        </section>
+
+        {page === "deposit" && (
+          <section className="card action">
+            <h3>Deposit Funds</h3>
+            <label>Amount</label>
+            <input value={depositAmount} onChange={(e) => setDepositAmount(e.target.value)} placeholder="0.10" />
+            <label>Days locked</label>
+            <input type="number" min={1} value={daysLocked} onChange={(e) => setDaysLocked(Number(e.target.value))} />
+            <div className="chips">
+              <button className={isTokenMode ? "chip" : "chip active"} onClick={() => setIsTokenMode(false)}>
+                Native
               </button>
-            )}
-          </motion.article>
+              <button className={isTokenMode ? "chip active" : "chip"} onClick={() => setIsTokenMode(true)}>
+                ERC20
+              </button>
+            </div>
+            {isTokenMode ? (
+              <>
+                <label>Token address</label>
+                <input value={tokenAddress} onChange={(e) => setTokenAddress(e.target.value)} placeholder="0x..." />
+              </>
+            ) : null}
+            <button className="primary" disabled={!account || isPending} onClick={() => void handleDeposit()}>
+              {isPending ? "Submitting..." : "Deposit to Vault"}
+            </button>
+          </section>
+        )}
+
+        {page === "withdraw" && (
+          <section className="card action">
+            <h3>Withdraw Funds</h3>
+            <label>Amount</label>
+            <input value={withdrawAmount} onChange={(e) => setWithdrawAmount(e.target.value)} placeholder="0.01" />
+            <button className="primary" disabled={!selectedFund || !lockMetrics.unlocked || isPending} onClick={() => void handleWithdraw()}>
+              {lockMetrics.unlocked ? "Withdraw available funds" : "Vault still locked"}
+            </button>
+          </section>
+        )}
+
+        <section className="card status">
+          <h3>Session Status</h3>
+          <p>{status}</p>
+          <p>
+            Contract: <a href={`${selectedNetwork.blockExplorer}/address/${selectedNetwork.contractAddress}`}>{shortAddress(selectedNetwork.contractAddress)}</a>
+          </p>
         </section>
       </main>
     </div>
