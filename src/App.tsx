@@ -61,14 +61,15 @@ function App() {
     setLoading(true);
     try {
       const total = await readFundCount();
-      const ids = Array.from({ length: total }, (_, idx) => idx);
+      const ids = Array.from({ length: total }, (_, idx) => idx + 1);
       const marketData = await readMarketData(ids);
       const enriched = await Promise.all(
         marketData.map(async (market, i) => {
-          const paymentToken = await readPaymentToken(i);
+          const fundId = i + 1;
+          const paymentToken = await readPaymentToken(fundId);
           return {
             ...market,
-            id: i,
+            id: fundId,
             paymentToken,
           } as VaultFund;
         }),
@@ -113,7 +114,7 @@ function App() {
 
   const handleDeposit = async () => {
     try {
-      if (!depositAmount || daysLocked <= 0) return;
+      if (!depositAmount || daysLocked < 0) return;
       let amount = toWei(depositAmount);
       let paymentToken = ZERO_ADDRESS;
 
@@ -268,7 +269,7 @@ function App() {
             <label>Amount</label>
             <input value={depositAmount} onChange={(e) => setDepositAmount(e.target.value)} placeholder="0.10" />
             <label>Days locked</label>
-            <input type="number" min={1} value={daysLocked} onChange={(e) => setDaysLocked(Number(e.target.value))} />
+            <input type="number" min={0} value={daysLocked} onChange={(e) => setDaysLocked(Number(e.target.value))} />
             <div className="chips">
               <button className={isTokenMode ? "chip" : "chip active"} onClick={() => setIsTokenMode(false)}>
                 Native
@@ -304,7 +305,7 @@ function App() {
           <h3>Session Status</h3>
           <p>{status}</p>
           <p>
-            Contract: <a href={`${selectedNetwork.blockExplorer}/address/${selectedNetwork.contractAddress}`}>{shortAddress(selectedNetwork.contractAddress)}</a>
+            Contract: <a href={`${selectedNetwork.blockExplorer}/address/${selectedNetwork.contractAddress}`} target="blank">{shortAddress(selectedNetwork.contractAddress)}</a>
           </p>
         </section>
       </main>

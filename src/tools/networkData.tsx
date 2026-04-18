@@ -20,7 +20,7 @@ export const chains: NetworkConfig[] = [
     blockExplorer: "https://sepolia.etherscan.io",
     decimals: 18,
     symbol: "ETH",
-    contractAddress: "0xB1383CABf4fFd42204Cc18Df5aF00066d5e71f6a" as Address,
+    contractAddress: "0x00A870a1c93C4a1569B270B537bE84E771D1786F" as Address,
   },
   {
     key: "hashkey",
