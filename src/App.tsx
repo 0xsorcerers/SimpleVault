@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Cell, Pie, PieChart, ResponsiveContainer } from "recharts";
 import type { Address } from "viem";
@@ -9,9 +9,11 @@ import {
   Connector,
   ZERO_ADDRESS,
   formatTokenAmount,
+  getBlockchain,
   readFundCount,
   readMarketData,
   readPaymentToken,
+  readTokenAllowance,
   readTokenDecimals,
   readTokenSymbol,
   toTokenSmallestUnit,
@@ -20,6 +22,92 @@ import {
   type VaultFund,
 } from "./tools/utils";
 import "./App.css";
+
+// Notification Types
+type NotificationType = "warning" | "error" | "success" | "info";
+
+interface Notification {
+  id: string;
+  type: NotificationType;
+  title: string;
+  message: string;
+}
+
+// Theme Hook
+function useTheme() {
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("vault-theme") as "light" | "dark" | null;
+      if (saved) return saved;
+      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+    return "light";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("vault-theme", theme);
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => (prev === "light" ? "dark" : "light"));
+  }, []);
+
+  return { theme, toggleTheme };
+}
+
+// Notification Hook
+function useNotifications() {
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+
+  const addNotification = useCallback((type: NotificationType, title: string, message: string) => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setNotifications((prev) => [...prev, { id, type, title, message }]);
+    
+    // Auto-remove after 5 seconds
+    setTimeout(() => {
+      setNotifications((prev) => prev.filter((n) => n.id !== id));
+    }, 5000);
+  }, []);
+
+  const removeNotification = useCallback((id: string) => {
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
+  }, []);
+
+  return { notifications, addNotification, removeNotification };
+}
+
+// Notification Component
+function NotificationItem({ notification, onClose }: { notification: Notification; onClose: (id: string) => void }) {
+  const icons: Record<NotificationType, string> = {
+    warning: "⚠️",
+    error: "❌",
+    success: "✅",
+    info: "ℹ️",
+  };
+
+  return (
+    <div className={`notification ${notification.type}`}>
+      <span className="notification-icon">{icons[notification.type]}</span>
+      <div className="notification-content">
+        <div className="notification-title">{notification.title}</div>
+        <div className="notification-message">{notification.message}</div>
+      </div>
+      <button className="notification-close" onClick={() => onClose(notification.id)}>
+        ×
+      </button>
+    </div>
+  );
+}
+
+// Theme Toggle Component
+function ThemeToggle({ theme, toggleTheme }: { theme: "light" | "dark"; toggleTheme: () => void }) {
+  return (
+    <button className="theme-toggle" onClick={toggleTheme} title={`Switch to ${theme === "light" ? "dark" : "light"} mode`}>
+      {theme === "light" ? "🌙" : "☀️"}
+    </button>
+  );
+}
 
 type Page = "dashboard" | "deposit" | "withdraw";
 
@@ -37,6 +125,8 @@ function App() {
   const account = useActiveAccount();
   const { selectedNetwork, setSelectedNetwork } = useNetworkStore();
   const { deposit, withdraw, approveToken, isPending } = useVaultTransactions();
+  const { theme, toggleTheme } = useTheme();
+  const { notifications, addNotification, removeNotification } = useNotifications();
 
   const [page, setPage] = useState<Page>("dashboard");
   const [allFunds, setAllFunds] = useState<VaultFund[]>([]);
@@ -85,6 +175,8 @@ function App() {
   };
 
   useEffect(() => {
+    setAllFunds([]);
+    setStatus(`Switching to ${selectedNetwork.name}...`);
     void loadVaults();
   }, [selectedNetwork]);
 
@@ -113,6 +205,10 @@ function App() {
   }, [selectedFund, now]);
 
   const handleDeposit = async () => {
+    if (!account?.address) {
+      addNotification("warning", "Wallet Not Connected", "Please connect your wallet to make a deposit.");
+      return;
+    }
     try {
       if (!depositAmount || daysLocked < 0) return;
       let amount = toWei(depositAmount);
@@ -126,7 +222,17 @@ function App() {
         paymentToken = tokenAddress as Address;
         const decimals = await readTokenDecimals(paymentToken);
         amount = toTokenSmallestUnit(depositAmount, decimals);
-        await approveToken(paymentToken, amount);
+        
+        // Check current allowance
+        const vaultAddress = getBlockchain().contractAddress;
+        const currentAllowance = await readTokenAllowance(paymentToken, account.address, vaultAddress);
+        
+        // Only approve if allowance is insufficient
+        if (currentAllowance < amount) {
+          setStatus("Approving token spend...");
+          await approveToken(paymentToken, amount);
+          setStatus("Token approved. Submitting deposit...");
+        }
       }
 
       await deposit({
@@ -146,6 +252,10 @@ function App() {
   };
 
   const handleWithdraw = async () => {
+    if (!account?.address) {
+      addNotification("warning", "Wallet Not Connected", "Please connect your wallet to make a withdrawal.");
+      return;
+    }
     if (!selectedFund || !withdrawAmount) return;
     try {
       const decimals = selectedFund.paymentToken === ZERO_ADDRESS ? 18 : await readTokenDecimals(selectedFund.paymentToken);
@@ -179,7 +289,14 @@ function App() {
   ];
 
   return (
-    <div className="vault-app">
+    <>
+      <ThemeToggle theme={theme} toggleTheme={toggleTheme} />
+      <div className="notification-container">
+        {notifications.map((notification) => (
+          <NotificationItem key={notification.id} notification={notification} onClose={removeNotification} />
+        ))}
+      </div>
+      <div className="vault-app">
       <header className="hero">
         <div>
           <p className="eyebrow">SimpleVault</p>
@@ -310,6 +427,7 @@ function App() {
         </section>
       </main>
     </div>
+    </>
   );
 }
 

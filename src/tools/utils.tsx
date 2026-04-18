@@ -166,6 +166,17 @@ export const readTokenSymbol = async (token: Address): Promise<string> => {
   return result as string;
 };
 
+export const readTokenAllowance = async (token: Address, owner: Address, spender: Address): Promise<bigint> => {
+  if (token === ZERO_ADDRESS) return 0n;
+  const result = await getPublicClient().readContract({
+    address: token,
+    abi: erc20Abi,
+    functionName: "allowance",
+    args: [owner, spender],
+  } as never);
+  return result as bigint;
+};
+
 export const toWei = (amount: string) => parseEther(amount || "0");
 
 export const toTokenSmallestUnit = (amount: string, decimals: number): bigint => {
@@ -217,22 +228,22 @@ export const useVaultTransactions = () => {
   const approveToken = async (tokenAddress: Address, amount: bigint) => {
     const tx = prepareTokenApprove(tokenAddress, amount);
     const res = await sendTx(tx);
-    await waitForReceipt({ client, chain: getThirdwebNetwork(), transactionHash: res.transactionHash });
-    return res;
+    const receipt = await waitForReceipt({ client, chain: getThirdwebNetwork(), transactionHash: res.transactionHash });
+    return receipt;
   };
 
   const deposit = async (params: DepositParams) => {
     const tx = prepareDeposit(params);
     const res = await sendTx({ ...tx, value: params.feeType ? 0n : params.marketBalance });
-    await waitForReceipt({ client, chain: getThirdwebNetwork(), transactionHash: res.transactionHash });
-    return res;
+    const receipt = await waitForReceipt({ client, chain: getThirdwebNetwork(), transactionHash: res.transactionHash });
+    return receipt;
   };
 
   const withdraw = async (fundId: number, amount: bigint) => {
     const tx = prepareWithdraw(fundId, amount);
     const res = await sendTx(tx);
-    await waitForReceipt({ client, chain: getThirdwebNetwork(), transactionHash: res.transactionHash });
-    return res;
+    const receipt = await waitForReceipt({ client, chain: getThirdwebNetwork(), transactionHash: res.transactionHash });
+    return receipt;
   };
 
   return { approveToken, deposit, withdraw, isPending, error };
