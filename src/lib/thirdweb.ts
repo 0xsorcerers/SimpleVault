@@ -2,8 +2,10 @@ import { createThirdwebClient } from 'thirdweb';
 import { darkTheme, lightTheme } from 'thirdweb/react';
 import { createWallet, inAppWallet, walletConnect } from 'thirdweb/wallets';
 
+export const hasThirdwebClientId = Boolean(import.meta.env.VITE_THIRDWEB_CLIENT_ID?.trim());
+
 export const thirdwebClient = createThirdwebClient({
-  clientId: import.meta.env.VITE_THIRDWEB_CLIENT_ID ?? '',
+  clientId: import.meta.env.VITE_THIRDWEB_CLIENT_ID?.trim() || 'missing-client-id',
 });
 
 export const wallets = [

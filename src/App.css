@@ -393,6 +393,7 @@ a {
 .chart-panel {
   position: relative;
   min-height: 320px;
+  perspective: 900px;
 }
 
 .center-orb {
@@ -411,6 +412,7 @@ a {
   justify-content: center;
   align-items: center;
   text-align: center;
+  transform-style: preserve-3d;
 }
 
 .center-orb span {

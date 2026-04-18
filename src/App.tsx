@@ -11,7 +11,7 @@ import {
   toThirdwebChain,
   type SupportedNetwork,
 } from './lib/networks';
-import { getConnectTheme, thirdwebClient, wallets } from './lib/thirdweb';
+import { getConnectTheme, hasThirdwebClientId, thirdwebClient, wallets } from './lib/thirdweb';
 import { useVault } from './hooks/useVault';
 import type { AppView, ThemeMode, VaultFund } from './types/vault';
 import './App.css';
@@ -115,7 +115,7 @@ function App() {
   const [tokenAddress, setTokenAddress] = useState('');
   const [tokenPreview, setTokenPreview] = useState('Token metadata will appear here.');
   const [withdrawAmount, setWithdrawAmount] = useState('');
-  const [nowMs, setNowMs] = useState(0);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -160,6 +160,14 @@ function App() {
   const connectedWrongChain = Boolean(account && activeChain?.id !== selectedNetwork.chainId);
   const configuredNetworkCount = configuredNetworks.length;
   const walletNetwork = getNetworkByChainId(activeChain?.id);
+  const tokenAddressValid = /^0x[a-fA-F0-9]{40}$/.test(tokenAddress);
+  const canCreateFund =
+    Boolean(account) &&
+    Boolean(contractAddress) &&
+    Boolean(amount.trim()) &&
+    daysLocked > 0 &&
+    !isPending &&
+    (assetMode === 'native' || tokenAddressValid);
 
   const handleTokenPreview = async () => {
     if (assetMode !== 'token') {
@@ -188,8 +196,12 @@ function App() {
 
     if (created) {
       setView('withdraw');
+      setSelectedFundId(null);
       setAmount('');
       setWithdrawAmount('');
+      setAssetMode('native');
+      setTokenAddress('');
+      setTokenPreview('Token metadata will appear here.');
     }
   };
 
@@ -249,21 +261,27 @@ function App() {
             <strong>Connect and continue</strong>
             <span>Coinbase Wallet is first in the list, then MetaMask, WalletConnect, and social login.</span>
           </div>
-          <ConnectButton
-            client={thirdwebClient}
-            chain={toThirdwebChain(selectedNetwork)}
-            wallets={wallets}
-            theme={getConnectTheme(mode)}
-            connectButton={{ label: account ? 'Wallet connected' : 'Connect wallet' }}
-            connectModal={{
-              size: 'wide',
-              title: 'Open SimpleVault',
-              welcomeScreen: {
-                title: 'SimpleVault',
-                subtitle: 'Lock assets with calm, polished control.',
-              },
-            }}
-          />
+          {hasThirdwebClientId ? (
+            <ConnectButton
+              client={thirdwebClient}
+              chain={toThirdwebChain(selectedNetwork)}
+              wallets={wallets}
+              theme={getConnectTheme(mode)}
+              connectButton={{ label: account ? 'Wallet connected' : 'Connect wallet' }}
+              connectModal={{
+                size: 'wide',
+                title: 'Open SimpleVault',
+                welcomeScreen: {
+                  title: 'SimpleVault',
+                  subtitle: 'Lock assets with calm, polished control.',
+                },
+              }}
+            />
+          ) : (
+            <div className="empty-state">
+              Add <code>VITE_THIRDWEB_CLIENT_ID</code> to your environment to enable wallet connection.
+            </div>
+          )}
           <div className="network-strip">
             {supportedNetworks.map((network) => (
               <button
@@ -446,7 +464,14 @@ function App() {
             </label>
 
             <div className="toggle-row">
-              <button className={assetMode === 'native' ? 'active' : ''} onClick={() => setAssetMode('native')}>
+              <button
+                className={assetMode === 'native' ? 'active' : ''}
+                onClick={() => {
+                  setAssetMode('native');
+                  setTokenAddress('');
+                  setTokenPreview('Token metadata will appear here.');
+                }}
+              >
                 Native asset
               </button>
               <button className={assetMode === 'token' ? 'active' : ''} onClick={() => setAssetMode('token')}>
@@ -469,7 +494,7 @@ function App() {
               </>
             )}
 
-            <button className="primary-action" disabled={!account || !amount || !contractAddress || isPending} onClick={() => void handleCreateFund()}>
+            <button className="primary-action" disabled={!canCreateFund} onClick={() => void handleCreateFund()}>
               {isPending ? 'Working...' : 'Create fund'}
             </button>
 

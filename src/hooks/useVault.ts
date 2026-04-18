@@ -11,6 +11,7 @@ import type { CreateFundInput, TokenMetadata, VaultFund, VaultStatus } from '../
 const vaultAbi = vaultJson.abi as Abi;
 const erc20Abi = erc20Json.abi as Abi;
 const zeroAddress = '0x0000000000000000000000000000000000000000' as Address;
+const isAddress = (value: string): value is Address => /^0x[a-fA-F0-9]{40}$/.test(value);
 
 const formatVaultBalance = (amount: bigint, decimals: number) => {
   const formatted = formatUnits(amount, decimals);
@@ -227,11 +228,26 @@ export function useVault(account?: Address, network: SupportedNetwork = defaultN
 
       try {
         const amount = input.amount.trim();
+        if (!amount || Number(amount) <= 0) {
+          setStatus({ tone: 'error', message: 'Enter a valid amount greater than zero.' });
+          return false;
+        }
+
+        if (!Number.isFinite(input.daysLocked) || input.daysLocked <= 0) {
+          setStatus({ tone: 'error', message: 'Lock duration must be at least 1 day.' });
+          return false;
+        }
+
         const daysLocked = BigInt(input.daysLocked);
         let parsedAmount = parseEther(amount);
         let tokenAddress = zeroAddress;
 
         if (input.feeType === 'token') {
+          if (!isAddress(input.paymentToken)) {
+            setStatus({ tone: 'error', message: 'Enter a valid ERC20 token address.' });
+            return false;
+          }
+
           tokenAddress = input.paymentToken;
           const metadata = await inspectToken(input.paymentToken);
           parsedAmount = parseUnits(amount, metadata.decimals);
@@ -306,12 +322,18 @@ export function useVault(account?: Address, network: SupportedNetwork = defaultN
       }
 
       try {
+        const normalizedAmount = amount.trim();
+        if (!normalizedAmount || Number(normalizedAmount) <= 0) {
+          setStatus({ tone: 'error', message: 'Enter a valid withdraw amount greater than zero.' });
+          return false;
+        }
+
         setStatus({ tone: 'pending', message: `Withdrawing ${fund.tokenSymbol} from fund #${fund.id.toString()}...` });
 
         const transaction = prepareContractCall({
           contract,
           method: 'function withdraw(uint256 _fund, uint256 _amount) payable',
-          params: [fund.id, parseUnits(amount, fund.tokenDecimals)],
+          params: [fund.id, parseUnits(normalizedAmount, fund.tokenDecimals)],
         });
 
         const result = await sendTransaction(transaction);
