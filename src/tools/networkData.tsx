@@ -30,7 +30,7 @@ export const chains: NetworkConfig[] = [
     blockExplorer: "https://hashkey.blockscout.com",
     decimals: 18,
     symbol: "HSK",
-    contractAddress: "0x0000000000000000000000000000000000000000" as Address,
+    contractAddress: import.meta.env.VITE_HASKEY_CONTRACT_ID as Address,
   },
 ];
 
